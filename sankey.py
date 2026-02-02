@@ -4,8 +4,10 @@ import plotly.graph_objects as go
 import logging
 import streamlit as st
 from datetime import datetime
+import os
+from io import BytesIO
 
-# ===================== 1. 页面配置 + Session State初始化（新增：管理搜索关键词状态） =====================
+# ===================== 1. 页面配置 + Session State初始化 =====================
 st.set_page_config(
     page_title="多站点流量-销量桑基图分析",
     page_icon="🌐",
@@ -13,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State，保存搜索关键词（关键修复：解决按钮无状态问题）
+# 初始化Session State
 if "search_keyword" not in st.session_state:
     st.session_state.search_keyword = ""
 
@@ -21,7 +23,7 @@ if "search_keyword" not in st.session_state:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ===================== 2. 全局配置（无修改） =====================
+# ===================== 2. 全局配置 =====================
 SITE_CONFIG = {
     "Amazon-US": {"cn_name": "亚马逊美国站", "color": "#87CEEB"},
     "Amazon-JP": {"cn_name": "亚马逊日本站", "color": "#FF6B6B"},
@@ -179,17 +181,33 @@ for traffic_type in TRAFFIC_MAPPING:
 # 无效流量类型过滤列表
 INVALID_TRAFFIC_TYPES = ["Amazon 页面总点击", "总曝光", "总点击", "总销量"]
 
-# ===================== 3. 读取Excel函数（无修改） =====================
+# ===================== 3. 读取Excel函数（支持本地文件和上传文件） =====================
 @st.cache_data
-def read_excel_generate_data(excel_path):
+def read_excel_generate_data(file_input):
+    """
+    读取Excel数据并生成桑基图所需格式
+    
+    参数:
+    file_input: 可以是文件路径字符串，也可以是UploadedFile对象
+    """
     try:
-        df = pd.read_excel(excel_path)
-        logger.info(f"成功读取Excel文件，数据行数：{len(df)}")
-        st.success(f"✅ 成功读取Excel文件，数据行数：{len(df)}")
+        # 判断输入类型
+        if isinstance(file_input, str):
+            # 如果是字符串，认为是文件路径
+            df = pd.read_excel(file_input, engine='openpyxl')
+            logger.info(f"成功从文件路径读取Excel，数据行数：{len(df)}")
+            st.success(f"✅ 成功读取Excel文件，数据行数：{len(df)}")
+        else:
+            # 如果是UploadedFile对象，需要先读取为字节流
+            bytes_data = file_input.getvalue()
+            df = pd.read_excel(BytesIO(bytes_data), engine='openpyxl')
+            logger.info(f"成功从上传文件读取Excel，数据行数：{len(df)}")
+            st.success(f"✅ 成功读取上传的Excel文件，数据行数：{len(df)}")
+        
     except Exception as e:
         logger.error(f"读取Excel失败：{str(e)}")
         st.error(f"❌ 读取Excel失败：{str(e)}")
-        return pd.DataFrame()  # 修改：返回空DataFrame，方便后续处理
+        return pd.DataFrame()  # 返回空DataFrame，方便后续处理
     
     # 数据预处理
     df["时间_str"] = df["时间"].astype(str)
@@ -241,29 +259,33 @@ def read_excel_generate_data(excel_path):
     logger.info(f"生成链路数据条数：{len(result_df)}")
     return result_df
 
-# ===================== 4. 应用标题（无修改） =====================
+# ===================== 4. 应用标题 =====================
 st.title("🌐 多站点流量-销量桑基图分析")
 st.markdown("---")
 
-# ===================== 5. 文件上传和数据加载（无修改） =====================
+# ===================== 5. 文件上传和数据加载 =====================
 default_excel_path = "1.5-1.19流量数据统计.xlsx"
 df = pd.DataFrame()
 
 with st.sidebar:
     st.header("⚙️ 控制面板")
     # 文件上传
-    uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx", "xls"], 
+                                     help="上传流量数据Excel文件，如果不上传将使用默认文件")
 
 # 确定Excel文件路径并加载数据
 if uploaded_file is not None:
-    EXCEL_PATH = uploaded_file
-    df = read_excel_generate_data(EXCEL_PATH)
+    # 使用上传的文件
+    df = read_excel_generate_data(uploaded_file)
     st.sidebar.success(f"📂 已上传文件: {uploaded_file.name}")
 else:
-    # 否则使用默认文件（本地测试时）
+    # 否则使用默认文件
     try:
-        df = read_excel_generate_data(default_excel_path)
-        st.sidebar.info(f"📂 使用默认文件: {default_excel_path}")
+        if os.path.exists(default_excel_path):
+            df = read_excel_generate_data(default_excel_path)
+            st.sidebar.info(f"📂 使用默认文件: {default_excel_path}")
+        else:
+            st.sidebar.warning("⚠️ 未找到默认Excel文件，请上传文件")
     except Exception as e:
         st.sidebar.error(f"❌ 默认文件加载失败: {str(e)}")
 
@@ -280,24 +302,32 @@ if not df.empty and df["date"].notna().any():
 else:
     logger.warning("未提取到有效日期，使用兜底默认值")
 
-# ===================== 6. 侧边栏控件（关键修复：搜索关键词的Session State管理） =====================
+# ===================== 6. 侧边栏控件（修复Session State管理） =====================
 with st.sidebar:
-    # 搜索区域：text_input绑定Session State变量（关键修复1）
-    search_keyword = st.text_input(
-        "🔍 链路搜索（支持站点/流量类型关键词）",
-        value=st.session_state.search_keyword,  # 绑定Session State的值
-        placeholder="输入关键词（如US/Shopify/DSP/站内）",
-        help="支持站点、流量类型关键词搜索"
-    )
-    # 将输入值同步回Session State（关键修复2）
-    st.session_state.search_keyword = search_keyword
+    st.markdown("---")
     
-    # 清空搜索按钮：更新Session State后rerun（关键修复3）
+    # 搜索区域：使用key参数自动管理Session State
+    search_input = st.text_input(
+        "🔍 链路搜索（支持站点/流量类型关键词）",
+        value=st.session_state.get("search_keyword", ""),  # 从Session State读取
+        placeholder="输入关键词（如US/Shopify/DSP/站内）",
+        help="支持站点、流量类型关键词搜索",
+        key="search_input"  # 使用key参数自动管理
+    )
+    
+    # 将输入值同步到Session State
+    if search_input != st.session_state.get("search_keyword", ""):
+        st.session_state.search_keyword = search_input
+    
+    # 清空搜索按钮 - 修复版本
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🗑️ 清空搜索", type="secondary", use_container_width=True):
-            st.session_state.search_keyword = ""  # 直接修改Session State
-            st.rerun()  # 刷新页面，使text_input同步为空
+            # 清空Session State中的搜索关键词
+            st.session_state.search_keyword = ""
+            # 清空输入框的值（通过key参数管理）
+            st.session_state.search_input = ""
+            st.rerun()  # 刷新页面
     
     st.markdown("---")
     st.subheader("📅 日期范围")
@@ -351,12 +381,12 @@ with st.sidebar:
     st.markdown("---")
     st.info("💡 提示：点击图表节点可以查看详细信息")
 
-# ===================== 7. 数据验证和后续处理（无修改） =====================
+# ===================== 7. 数据验证和后续处理 =====================
 if df.empty:
     st.error("❌ 无有效数据可展示，请上传正确的Excel文件")
     st.stop()
 
-# ===================== 8. 数据筛选和处理（无修改） =====================
+# ===================== 8. 数据筛选和处理 =====================
 # 显示数据摘要
 with st.expander("📊 数据摘要", expanded=True):
     col1, col2, col3, col4 = st.columns(4)
@@ -384,7 +414,7 @@ filtered_df = df[(df["date"] >= start_date_dt) & (df["date"] <= end_date_dt)]
 aggregated_df = filtered_df.groupby(["source", "target", "group", "traffic_type"], as_index=False)["value"].sum()
 aggregated_df = aggregated_df[aggregated_df["value"] > 0]
 
-# ===================== 9. 生成节点列表（无修改） =====================
+# ===================== 9. 生成节点列表 =====================
 # 拆分流量类型为Amazon组和Shopify组
 Amazon_TRAFFIC = [t for t in TRAFFIC_ORDER if TRAFFIC_MAPPING[t]["site"] == "Amazon-US"]
 Shopify_TRAFFIC = [t for t in TRAFFIC_ORDER if TRAFFIC_MAPPING[t]["site"] == "Shopify"]
@@ -434,7 +464,7 @@ all_nodes = (
 
 node_ids = {node: idx for idx, node in enumerate(all_nodes)}
 
-# ===================== 10. 节点统计（无修改） =====================
+# ===================== 10. 节点统计 =====================
 node_stats = {}
 for node in all_nodes:
     incoming = aggregated_df[aggregated_df["target"] == node]["value"].sum()
@@ -475,8 +505,9 @@ for node in all_nodes:
     
     node_customdata.append((incoming, outgoing, ratio))
 
-# ===================== 11. 搜索关键词匹配（无修改） =====================
-search_keyword = st.session_state.search_keyword  # 从Session State读取当前值（关键修复4）
+# ===================== 11. 搜索关键词匹配 =====================
+# 从Session State读取搜索关键词
+search_keyword = st.session_state.get("search_keyword", "")
 search_keyword = search_keyword.strip().lower() if isinstance(search_keyword, str) else ""
 matched_traffic_types = []
 
@@ -508,7 +539,7 @@ for traffic_type in matched_traffic_types:
     ])
 matched_nodes = list(set(matched_nodes))
 
-# ===================== 12. 生成链路（无修改） =====================
+# ===================== 12. 生成链路 =====================
 total_incoming = aggregated_df.groupby("target")["value"].sum().to_dict()
 exposure_link = [
     (s, TRAFFIC_MAPPING[s]["nodes"]["exposure"]) for s in TRAFFIC_ORDER
@@ -548,7 +579,7 @@ for _, row in aggregated_df.iterrows():
     link_colors.append(final_color)
     link_customdata.append([source, target, original_val, ratio])
 
-# ===================== 13. 节点颜色（无修改） =====================
+# ===================== 13. 节点颜色 =====================
 node_color_list = []
 for node in all_nodes:
     if node in matched_nodes:
@@ -564,7 +595,7 @@ for node in all_nodes:
         node_color = "rgba(200, 200, 200, 0.2)"
     node_color_list.append(node_color)
 
-# ===================== 14. 绘制桑基图（无修改） =====================
+# ===================== 14. 绘制桑基图 =====================
 fig = go.Figure(data=[go.Sankey(
     node=dict(
         pad=20,
@@ -602,7 +633,7 @@ fig.update_layout(
 # 显示图表
 st.plotly_chart(fig, use_container_width=True, height=800)
 
-# ===================== 15. 数据显示区域（无修改） =====================
+# ===================== 15. 数据显示区域 =====================
 with st.expander("📋 查看详细数据"):
     tab1, tab2, tab3 = st.tabs(["原始数据", "流量类型统计", "站点统计"])
     
@@ -626,7 +657,7 @@ with st.expander("📋 查看详细数据"):
         st.write(f"\n**流量类型总数:** {len(TRAFFIC_ORDER)}")
         st.write(f"**匹配的流量类型:** {len(matched_traffic_types)}")
 
-# ===================== 16. 页脚信息（无修改） =====================
+# ===================== 16. 页脚信息 =====================
 st.markdown("---")
 st.caption(f"📅 数据更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 st.caption("💡 提示：修改Excel文件后，重新上传即可更新图表和默认日期范围")
