@@ -196,38 +196,53 @@ def read_excel_generate_data(excel_path):
     try:
         df = pd.read_excel(excel_path)
         logger.info(f"成功读取Excel文件，数据行数：{len(df)}")
+        # 新增：显示Excel的列名和前2行，方便排查列名问题
         st.success(f"✅ 成功读取Excel文件，数据行数：{len(df)}")
+        st.info("Excel列名：" + ", ".join(df.columns.tolist()))
+        st.info("Excel前2行预览：")
+        st.dataframe(df.head(2))  # 显示前2行，确认数据格式
+        
     except Exception as e:
         logger.error(f"读取Excel失败：{str(e)}")
         st.error(f"❌ 读取Excel失败：{str(e)}")
-        return pd.DataFrame()  # 返回空DataFrame，方便后续处理
+        return pd.DataFrame()
     
     # 数据预处理
     df["时间_str"] = df["时间"].astype(str)
     df["date"] = df["时间_str"].str.split(" ").str[0].str.replace("/", "-")
     df["date"] = df["date"].replace(["nan", "NaT", ""], pd.NaT)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")  # 保留datetime类型，方便后续提取最值
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     
+    # 新增：显示时间列处理结果，排查日期问题
+    st.info(f"时间列处理后，有效日期行数：{df['date'].notna().sum()}")
+
     data_raw = []
-    for _, row in df.iterrows():
+    skipped_count = 0  # 统计被跳过的行数
+    for idx, row in df.iterrows():
         if pd.isna(row["date"]):
+            skipped_count +=1
+            logger.debug(f"第{idx+1}行：时间为空，跳过")
             continue
         
         traffic_type = row["流量类型"]
         if traffic_type in INVALID_TRAFFIC_TYPES:
-            logger.debug(f"过滤无效流量类型：{traffic_type}")
+            skipped_count +=1
+            logger.debug(f"第{idx+1}行：流量类型是无效类型{traffic_type}，跳过")
             continue
         
         if traffic_type not in TRAFFIC_MAPPING:
-            logger.warning(f"未配置的流量类型：{traffic_type}（已跳过）")
+            skipped_count +=1
+            logger.warning(f"第{idx+1}行：未配置的流量类型{traffic_type}，跳过")
+            st.warning(f"第{idx+1}行：流量类型「{traffic_type}」未配置，已跳过")  # 显示未配置的流量类型
             continue
         
         cfg = TRAFFIC_MAPPING[traffic_type]
         if cfg["site"] not in SITE_CONFIG:
-            logger.warning(f"非法站点：{cfg['site']}（流量类型：{traffic_type}，已跳过）")
+            skipped_count +=1
+            logger.warning(f"第{idx+1}行：非法站点{cfg['site']}，跳过")
             continue
         
-        date = row["date"].strftime("%Y-%m-%d")  # 后续存储用字符串格式
+        # 数值列处理
         exposure = pd.to_numeric(row["曝光"], errors="coerce") if pd.notna(row["曝光"]) else 0.0
         click = pd.to_numeric(row["点击"], errors="coerce") if pd.notna(row["点击"]) else 0.0
         sales = pd.to_numeric(row["销量"], errors="coerce") if pd.notna(row["销量"]) else 0.0
@@ -244,7 +259,9 @@ def read_excel_generate_data(excel_path):
             [cfg["nodes"]["level2_sales"], "总销量", float(sales), date, cfg["group_id"], traffic_type]
         ])
     
-    # 转换为DataFrame返回，方便同时获取原始数据和日期范围
+    # 新增：显示跳过统计
+    st.info(f"共跳过{skipped_count}行数据，有效数据行数：{len(data_raw)//9}（每条原始数据生成9条链路）")
+    
     result_df = pd.DataFrame(data_raw, columns=["source", "target", "value", "date", "group", "traffic_type"])
     if not result_df.empty:
         result_df["date"] = pd.to_datetime(result_df["date"])
@@ -637,3 +654,4 @@ with st.expander("📋 查看详细数据"):
 st.markdown("---")
 st.caption(f"📅 数据更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 st.caption("💡 提示：修改Excel文件后，重新上传即可更新图表和默认日期范围")
+
